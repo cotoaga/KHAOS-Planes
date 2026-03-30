@@ -50,7 +50,6 @@ let idCounter = 0;
 const genId = () => `n_${++idCounter}_${Date.now()}`;
 
 export default function KhaosPlanes() {
-  const canvasRef = useRef(null);
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
   const [nodes, setNodes] = useState([
     { id: "root", x: 0, y: 0, text: "KHAOS\nCosmology", type: "house", w: 180, h: 90 },
@@ -61,7 +60,10 @@ export default function KhaosPlanes() {
   const [selected, setSelected] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editText, setEditText] = useState("");
+  // connecting: null | { nodeId: string }
+  // Ghost follows mouseWorld. First click = set source, second click on valid target = connect.
   const [connecting, setConnecting] = useState(null);
+  const [mouseWorld, setMouseWorld] = useState({ x: 0, y: 0 });
   const [tool, setTool] = useState("select");
   const [addType, setAddType] = useState("concept");
   const [showHelp, setShowHelp] = useState(true);
@@ -119,22 +121,46 @@ export default function KhaosPlanes() {
     [nodes]
   );
 
+  const isAlreadyConnected = useCallback(
+    (aId, bId) =>
+      connections.some(
+        (c) => (c.from === aId && c.to === bId) || (c.from === bId && c.to === aId)
+      ),
+    [connections]
+  );
+
   const handlePointerDown = useCallback(
     (e) => {
       if (e.button === 2) return;
       setContextMenu(null);
       const world = screenToWorld(e.clientX, e.clientY);
 
+      // ── Connect tool: click-click paradigm ──────────────────────────────
       if (tool === "connect") {
         const node = getNodeAt(world.x, world.y);
-        if (node) setConnecting(node.id);
+
+        if (!connecting) {
+          // First click — pick source
+          if (node) setConnecting({ nodeId: node.id });
+        } else {
+          // Second click — pick target
+          if (node && node.id !== connecting.nodeId && !isAlreadyConnected(connecting.nodeId, node.id)) {
+            setConnections((prev) => [...prev, { from: connecting.nodeId, to: node.id, id: genId() }]);
+          }
+          // Any second click (hit or miss, valid or not) ends this connection attempt
+          setConnecting(null);
+        }
         return;
       }
 
+      // ── Add tool ─────────────────────────────────────────────────────────
       if (tool === "add") {
         const node = getNodeAt(world.x, world.y);
         if (!node) {
-          const newNode = { id: genId(), x: world.x, y: world.y, text: NODE_TYPES[addType].label, type: addType, w: 160, h: 70 };
+          const newNode = {
+            id: genId(), x: world.x, y: world.y,
+            text: NODE_TYPES[addType].label, type: addType, w: 160, h: 70,
+          };
           setNodes((prev) => [...prev, newNode]);
           setSelected(newNode.id);
           setEditing(newNode.id);
@@ -143,6 +169,7 @@ export default function KhaosPlanes() {
         }
       }
 
+      // ── Select tool ───────────────────────────────────────────────────────
       const node = getNodeAt(world.x, world.y);
       if (node) {
         setSelected(node.id);
@@ -152,13 +179,16 @@ export default function KhaosPlanes() {
         setPanning({ startX: e.clientX, startY: e.clientY, camX: camera.x, camY: camera.y });
       }
     },
-    [tool, addType, screenToWorld, getNodeAt, camera]
+    [tool, addType, connecting, isAlreadyConnected, screenToWorld, getNodeAt, camera]
   );
 
   const handlePointerMove = useCallback(
     (e) => {
+      const world = screenToWorld(e.clientX, e.clientY);
+      // Always track cursor world position (drives ghost in connect mode)
+      setMouseWorld(world);
+
       if (dragging) {
-        const world = screenToWorld(e.clientX, e.clientY);
         setNodes((prev) =>
           prev.map((n) =>
             n.id === dragging.nodeId
@@ -175,25 +205,11 @@ export default function KhaosPlanes() {
     [dragging, panning, screenToWorld, camera.zoom]
   );
 
-  const handlePointerUp = useCallback(
-    (e) => {
-      if (connecting) {
-        const world = screenToWorld(e.clientX, e.clientY);
-        const target = getNodeAt(world.x, world.y);
-        if (target && target.id !== connecting) {
-          const exists = connections.some(
-            (c) => (c.from === connecting && c.to === target.id) || (c.from === target.id && c.to === connecting)
-          );
-          if (!exists)
-            setConnections((prev) => [...prev, { from: connecting, to: target.id, id: genId() }]);
-        }
-        setConnecting(null);
-      }
-      setDragging(null);
-      setPanning(null);
-    },
-    [connecting, connections, screenToWorld, getNodeAt]
-  );
+  const handlePointerUp = useCallback(() => {
+    setDragging(null);
+    setPanning(null);
+    // connecting is intentionally NOT cleared here — it's click-click, not press-drag-release
+  }, []);
 
   const handleDoubleClick = useCallback(
     (e) => {
@@ -273,7 +289,11 @@ export default function KhaosPlanes() {
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
-      else if (e.key === "Escape") { setSelected(null); setConnecting(null); setTool("select"); }
+      else if (e.key === "Escape") {
+        setConnecting(null);  // cancel in-progress connection
+        setSelected(null);
+        setTool("select");
+      }
       else if (e.key === "1") setTool("select");
       else if (e.key === "2") setTool("add");
       else if (e.key === "3") setTool("connect");
@@ -281,6 +301,12 @@ export default function KhaosPlanes() {
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [editing, commitEdit, deleteSelected]);
+
+  // Also cancel connecting when switching away from connect tool
+  const setToolAndReset = useCallback((t) => {
+    if (t !== "connect") setConnecting(null);
+    setTool(t);
+  }, []);
 
   // ── Render helpers ────────────────────────────────────────────────────────
 
@@ -347,18 +373,41 @@ export default function KhaosPlanes() {
       const isSelected = selected === node.id;
       const isHovered = hoveredNode === node.id;
       const isEditing = editing === node.id;
+      const isConnectSource = connecting?.nodeId === node.id;
+      const isValidTarget =
+        connecting &&
+        node.id !== connecting.nodeId &&
+        !isAlreadyConnected(connecting.nodeId, node.id);
+      const isHoveredValidTarget = isValidTarget && isHovered;
       const fontSize = Math.max(8, 13 * camera.zoom);
       const iconSize = Math.max(8, 11 * camera.zoom);
 
-      const borderColor = isSelected
+      // Border priority: connect-source > hovered-valid-target > selected > hovered > default
+      const borderColor = isConnectSource
+        ? C.connectionActive
+        : isHoveredValidTarget
+        ? "#ffffff"
+        : isSelected
         ? typeInfo.color
         : isHovered
         ? C.nodeHover
         : C.nodeBorder;
-      const borderWidth = isSelected ? 2 : 1;
+      const borderWidth = isConnectSource || isHoveredValidTarget || isSelected ? 2 : 1;
 
       return (
         <g key={node.id}>
+          {/* Valid-target pulse ring */}
+          {isValidTarget && (
+            <rect
+              x={screen.x - w / 2 - 4} y={screen.y - h / 2 - 4}
+              width={w + 8} height={h + 8}
+              fill="none"
+              stroke={isHoveredValidTarget ? "#ffffff" : "rgba(0,212,255,0.3)"}
+              strokeWidth={isHoveredValidTarget ? 2 : 1}
+              strokeDasharray="4 3"
+              opacity={isHoveredValidTarget ? 0.9 : 0.4}
+            />
+          )}
           {node.type === "attractor" && (
             <ellipse cx={screen.x} cy={screen.y} rx={w * 0.9} ry={h * 0.9}
               fill={C.attractorGlow} opacity={0.5 + (isSelected ? 0.2 : 0)} />
@@ -379,11 +428,12 @@ export default function KhaosPlanes() {
             onMouseEnter={() => setHoveredNode(node.id)}
             onMouseLeave={() => setHoveredNode(null)}
           />
-          {/* Type accent line — left edge */}
+          {/* Type accent stripe — left edge */}
           <rect
             x={screen.x - w / 2} y={screen.y - h / 2}
             width={Math.max(2, 3 * camera.zoom)} height={h}
-            fill={typeInfo.color} opacity={isSelected ? 0.9 : 0.5}
+            fill={typeInfo.color}
+            opacity={isConnectSource ? 1 : isSelected ? 0.9 : 0.5}
             style={{ pointerEvents: "none" }}
           />
           <text
@@ -431,6 +481,78 @@ export default function KhaosPlanes() {
       );
     });
 
+  // Ghost node + live edge rendered while a connection is in progress
+  const renderConnectingGhost = () => {
+    if (!connecting) return null;
+    const sourceNode = nodes.find((n) => n.id === connecting.nodeId);
+    if (!sourceNode) return null;
+
+    const ghostScreen = worldToScreen(mouseWorld.x, mouseWorld.y);
+    const sourceScreen = worldToScreen(sourceNode.x, sourceNode.y);
+    const w = sourceNode.w * camera.zoom;
+    const h = sourceNode.h * camera.zoom;
+    const typeInfo = NODE_TYPES[sourceNode.type] || NODE_TYPES.concept;
+    const fontSize = Math.max(8, 13 * camera.zoom);
+    const iconSize = Math.max(8, 11 * camera.zoom);
+    const lines = sourceNode.text.split("\n");
+
+    return (
+      <g>
+        {/* Live edge from source center to ghost center */}
+        <line
+          x1={sourceScreen.x} y1={sourceScreen.y}
+          x2={ghostScreen.x} y2={ghostScreen.y}
+          stroke={C.connectionActive}
+          strokeWidth={1.5}
+          strokeDasharray="6 4"
+          opacity={0.65}
+        />
+        {/* Midpoint dot */}
+        <circle
+          cx={(sourceScreen.x + ghostScreen.x) / 2}
+          cy={(sourceScreen.y + ghostScreen.y) / 2}
+          r={3} fill={C.connectionActive} opacity={0.65}
+        />
+        {/* Ghost node — semi-opaque copy of source */}
+        <g opacity={0.32} style={{ pointerEvents: "none" }}>
+          <rect
+            x={ghostScreen.x - w / 2} y={ghostScreen.y - h / 2}
+            width={w} height={h}
+            rx={sourceNode.type === "warren" ? w * 0.15 : 0}
+            fill={C.node}
+            stroke={typeInfo.color}
+            strokeWidth={1}
+          />
+          <rect
+            x={ghostScreen.x - w / 2} y={ghostScreen.y - h / 2}
+            width={Math.max(2, 3 * camera.zoom)} height={h}
+            fill={typeInfo.color}
+          />
+          <text
+            x={ghostScreen.x - w / 2 + 10 * camera.zoom}
+            y={ghostScreen.y - h / 2 + 14 * camera.zoom}
+            fontSize={iconSize} fill={typeInfo.color}
+            style={{ userSelect: "none" }}
+          >
+            {typeInfo.icon}
+          </text>
+          {lines.map((line, i) => (
+            <text key={i}
+              x={ghostScreen.x}
+              y={ghostScreen.y + (i - (lines.length - 1) / 2) * (fontSize * 1.4)}
+              textAnchor="middle" dominantBaseline="central"
+              fontSize={fontSize} fontFamily={CANVAS_FONT}
+              fill={C.text}
+              style={{ userSelect: "none" }}
+            >
+              {line}
+            </text>
+          ))}
+        </g>
+      </g>
+    );
+  };
+
   // ── Chrome styles ─────────────────────────────────────────────────────────
 
   const panelStyle = {
@@ -466,6 +588,16 @@ export default function KhaosPlanes() {
     color: "#191A2E",
   };
 
+  // Connect tool is "armed" (source picked) — show a distinct state
+  const btnConnectArmed = {
+    ...btnBase,
+    background: C.connectionActive,
+    border: `1px solid ${C.connectionActive}`,
+    color: "#191A2E",
+  };
+
+  const isConnectArmed = tool === "connect" && connecting;
+
   return (
     <div
       ref={containerRef}
@@ -474,7 +606,10 @@ export default function KhaosPlanes() {
         background: C.bg,
         position: "relative", overflow: "hidden",
         fontFamily: UI_FONT,
-        cursor: tool === "add" || tool === "connect" ? "crosshair" : panning ? "grabbing" : "default",
+        cursor: tool === "add" ? "crosshair"
+              : tool === "connect" ? (connecting ? "crosshair" : "crosshair")
+              : panning ? "grabbing"
+              : "default",
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -487,15 +622,7 @@ export default function KhaosPlanes() {
         {renderGrid()}
         {renderConnections()}
         {renderNodes()}
-        {connecting && hoveredNode && hoveredNode !== connecting && (() => {
-          const hn = nodes.find((n) => n.id === hoveredNode);
-          if (!hn) return null;
-          const s = worldToScreen(hn.x, hn.y);
-          return (
-            <circle cx={s.x} cy={s.y} r={8}
-              fill="none" stroke={C.connectionActive} strokeWidth={2} opacity={0.8} />
-          );
-        })()}
+        {renderConnectingGhost()}
       </svg>
 
       {/* ── Toolbar ── */}
@@ -505,11 +632,18 @@ export default function KhaosPlanes() {
           { key: "add",     label: "Add",     shortcut: "2", icon: "+" },
           { key: "connect", label: "Connect", shortcut: "3", icon: "⟶" },
         ].map((t) => (
-          <button key={t.key} onClick={() => setTool(t.key)}
-            style={tool === t.key ? btnActive : btnBase}>
+          <button key={t.key} onClick={() => setToolAndReset(t.key)}
+            style={
+              t.key === "connect" && isConnectArmed ? btnConnectArmed
+              : tool === t.key ? btnActive
+              : btnBase
+            }>
             <span style={{ fontSize: 13 }}>{t.icon}</span>
             <span>{t.label}</span>
-            <span style={{ opacity: 0.45, fontSize: 10, fontWeight: 400 }}>{t.shortcut}</span>
+            {t.key === "connect" && isConnectArmed
+              ? <span style={{ opacity: 0.7, fontSize: 10 }}>pick target</span>
+              : <span style={{ opacity: 0.45, fontSize: 10, fontWeight: 400 }}>{t.shortcut}</span>
+            }
           </button>
         ))}
       </div>
@@ -604,7 +738,7 @@ export default function KhaosPlanes() {
           position: "absolute", bottom: 12, left: 12,
           ...panelStyle, padding: "12px 16px",
           color: C.textDim, fontSize: 11, lineHeight: 1.9,
-          maxWidth: 290, boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+          maxWidth: 300, boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <span style={{ color: C.text, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>Controls</span>
@@ -616,7 +750,7 @@ export default function KhaosPlanes() {
           {[
             ["Select [1]", "click node · drag to move"],
             ["Add [2]",    "click canvas to place"],
-            ["Connect [3]","drag node to node"],
+            ["Connect [3]","click source · click target · Esc cancels"],
             ["Dbl-click",  "edit text (Shift+Enter: newline)"],
             ["Right-click","type cycle · delete"],
             ["Del",        "delete selected"],
